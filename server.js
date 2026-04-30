@@ -18,7 +18,7 @@ app.get("/", (req, res) => {
   res.json({
     ok: true,
     service: "TacLines AI Backend",
-    routes: ["/calibrate", "/plan-shot"]
+    routes: ["/calibrate", "/plan-shot", "/ai-play-step"]
   });
 });
 
@@ -43,7 +43,6 @@ app.post("/calibrate", async (req, res) => {
     return res.json(normalized);
   } catch (err) {
     console.error("Calibration error:", err);
-
     return res.status(500).json(emptyCalibration(getErrorMessage(err)));
   }
 });
@@ -93,8 +92,36 @@ app.post("/plan-shot", async (req, res) => {
     return res.json(plan);
   } catch (err) {
     console.error("Plan-shot error:", err);
-
     return res.status(500).json(emptyShotPlan(getErrorMessage(err)));
+  }
+});
+
+app.post("/ai-play-step", async (req, res) => {
+  try {
+    const imageUrl = getImageUrlFromRequest(req);
+    const stepIndex = Number(req.body?.step_index ?? 0);
+    const maxSteps = Number(req.body?.max_steps ?? 5);
+
+    const step = await detectAiPlayStep(imageUrl, {
+      stepIndex,
+      maxSteps
+    });
+
+    const normalized = normalizeAiPlayStep(step);
+
+    console.log("AI Play Step:", {
+      ok: normalized.ok,
+      action: normalized.action,
+      confidence: normalized.confidence,
+      done: normalized.done,
+      shouldShoot: normalized.shouldShoot,
+      message: normalized.message
+    });
+
+    return res.json(normalized);
+  } catch (err) {
+    console.error("AI Play Step error:", err);
+    return res.status(500).json(emptyAiPlayStep(getErrorMessage(err)));
   }
 });
 
@@ -200,6 +227,83 @@ async function detectPoolScene(imageUrl, options = {}) {
   }
 }
 
+async function detectAiPlayStep(imageUrl, options = {}) {
+  const stepIndex = Number.isFinite(options.stepIndex) ? options.stepIndex : 0;
+  const maxSteps = Number.isFinite(options.maxSteps) ? options.maxSteps : 5;
+
+  const response = await client.responses.create({
+    model: MODEL,
+    temperature: 0,
+    input: [
+      {
+        role: "system",
+        content: [
+          {
+            type: "input_text",
+            text:
+              "Você é o controlador visual de um app Android jogando sinuca 8 Ball Pool em modo offline. " +
+              "Você recebe UM print atual da tela e deve decidir UM próximo passo. " +
+              "Seu objetivo é jogar com segurança. " +
+              "Ignore HUD, botões, texto, nomes, avatar, menus e elementos fora da mesa. " +
+              "Use apenas a mesa, bolas, caçapas, taco e linha de mira visível do jogo. " +
+              "Se a mira atual ainda NÃO estiver alinhada com uma tacada boa, retorne action='drag' com um micro movimento curto para ajustar a mira. " +
+              "Se a mira atual JÁ estiver alinhada com uma tacada boa, retorne action='shoot' com gesto de puxar/soltar. " +
+              "Se não conseguir ver a mesa, bola branca ou uma jogada clara, retorne action='stop'. " +
+              "NÃO chute gestos gigantes. Ajustes de mira devem ser pequenos e controlados. " +
+              "Use coordenadas em pixels da imagem recebida. " +
+              "gesture.fromX/fromY e toX/toY devem ser coordenadas absolutas da tela. " +
+              "Retorne somente JSON conforme schema."
+          }
+        ]
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text:
+              `Este é o passo ${stepIndex + 1} de no máximo ${maxSteps}. ` +
+              "Analise a mesa atual. " +
+              "Se precisar ajustar mira, action='drag', done=false, shouldShoot=false. " +
+              "Para action='drag', use movimento curto, normalmente entre 20 e 120 pixels. " +
+              "Use o gesto sobre a região da bola branca/taco/área de mira, não no HUD. " +
+              "Se a mira estiver boa para encaçapar uma bola, action='shoot', done=true, shouldShoot=true. " +
+              "Para action='shoot', faça um gesto de força mais longo no sentido correto para bater. " +
+              "Se a tela estiver confusa, action='stop', done=true. " +
+              "Não use caçapas impossíveis, bancos ou jogadas muito cortadas. Priorize tacadas simples."
+          },
+          {
+            type: "input_image",
+            image_url: imageUrl
+          }
+        ]
+      }
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "ai_play_step",
+        strict: true,
+        schema: aiPlayStepSchema()
+      }
+    }
+  });
+
+  const text = response.output_text;
+
+  if (!text || typeof text !== "string") {
+    console.error("AI step sem output_text:", JSON.stringify(response, null, 2));
+    throw new Error("IA não retornou JSON no passo");
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    console.error("JSON inválido ai-play-step:", text);
+    throw new Error("IA retornou JSON inválido no passo");
+  }
+}
+
 function sceneSchema() {
   return {
     type: "object",
@@ -275,6 +379,54 @@ function sceneSchema() {
   };
 }
 
+function aiPlayStepSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "ok",
+      "action",
+      "confidence",
+      "gesture",
+      "done",
+      "shouldShoot",
+      "message"
+    ],
+    properties: {
+      ok: { type: "boolean" },
+      action: {
+        type: "string",
+        enum: ["drag", "shoot", "stop", "fail", "none"]
+      },
+      confidence: {
+        type: "number",
+        minimum: 0,
+        maximum: 1
+      },
+      gesture: {
+        anyOf: [
+          {
+            type: "object",
+            additionalProperties: false,
+            required: ["fromX", "fromY", "toX", "toY", "durationMs"],
+            properties: {
+              fromX: { type: "number" },
+              fromY: { type: "number" },
+              toX: { type: "number" },
+              toY: { type: "number" },
+              durationMs: { type: "number" }
+            }
+          },
+          { type: "null" }
+        ]
+      },
+      done: { type: "boolean" },
+      shouldShoot: { type: "boolean" },
+      message: { type: "string" }
+    }
+  };
+}
+
 function normalizeCalibration(raw) {
   const ok = Boolean(raw?.ok);
   const confidence = clampNumber(raw?.confidence, 0, 1, 0);
@@ -312,6 +464,53 @@ function normalizeCalibration(raw) {
     balls,
     pockets,
     message: String(raw?.message || "")
+  };
+}
+
+function normalizeAiPlayStep(raw) {
+  const action = String(raw?.action || "fail").toLowerCase();
+  const confidence = clampNumber(raw?.confidence, 0, 1, 0);
+  const gesture = normalizeGesture(raw?.gesture);
+  const done = Boolean(raw?.done);
+  const shouldShoot = Boolean(raw?.shouldShoot);
+
+  const actionNeedsGesture = action === "drag" || action === "shoot";
+
+  return {
+    ok: Boolean(raw?.ok) && confidence >= 0.35 && (!actionNeedsGesture || gesture !== null),
+    action,
+    confidence,
+    gesture,
+    done,
+    shouldShoot,
+    message: String(raw?.message || "")
+  };
+}
+
+function normalizeGesture(g) {
+  if (!g || typeof g !== "object") return null;
+
+  const fromX = Number(g.fromX);
+  const fromY = Number(g.fromY);
+  const toX = Number(g.toX);
+  const toY = Number(g.toY);
+  const durationMs = Number(g.durationMs);
+
+  if (
+    !Number.isFinite(fromX) ||
+    !Number.isFinite(fromY) ||
+    !Number.isFinite(toX) ||
+    !Number.isFinite(toY)
+  ) {
+    return null;
+  }
+
+  return {
+    fromX: clampNumber(fromX, 0, 10000, 0),
+    fromY: clampNumber(fromY, 0, 10000, 0),
+    toX: clampNumber(toX, 0, 10000, 0),
+    toY: clampNumber(toY, 0, 10000, 0),
+    durationMs: clampNumber(durationMs, 60, 900, 220)
   };
 }
 
@@ -719,6 +918,18 @@ function emptyShotPlan(message) {
     pull: null,
     power: 0,
     message: message || "Sem plano de tacada"
+  };
+}
+
+function emptyAiPlayStep(message) {
+  return {
+    ok: false,
+    action: "fail",
+    confidence: 0,
+    gesture: null,
+    done: true,
+    shouldShoot: false,
+    message: message || "Falha no passo da IA"
   };
 }
 
