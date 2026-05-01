@@ -13,11 +13,14 @@ const client = new OpenAI({
 
 const PORT = process.env.PORT || 3000;
 const MODEL = "gpt-5.5";
+const REASONING = { effort: "high" };
 
 app.get("/", (req, res) => {
   res.json({
     ok: true,
     service: "TacLines AI Backend",
+    model: MODEL,
+    reasoning: REASONING,
     routes: ["/calibrate", "/plan-shot", "/ai-play-step", "/fine-tune-shot"]
   });
 });
@@ -196,7 +199,7 @@ async function detectPoolScene(imageUrl, options = {}) {
 
   const response = await client.responses.create({
     model: MODEL,
-    temperature: 0,
+    reasoning: REASONING,
     input: [
       {
         role: "system",
@@ -271,7 +274,7 @@ async function detectAiPlayStep(imageUrl, options = {}) {
 
   const response = await client.responses.create({
     model: MODEL,
-    temperature: 0,
+    reasoning: REASONING,
     input: [
       {
         role: "system",
@@ -356,7 +359,7 @@ async function detectFineTuneShot(imageUrl, options = {}) {
 
   const response = await client.responses.create({
     model: MODEL,
-    temperature: 0,
+    reasoning: REASONING,
     input: [
       {
         role: "system",
@@ -1173,5 +1176,5 @@ function getErrorMessage(err) {
 }
 
 app.listen(PORT, () => {
-  console.log(`TacLines AI Backend rodando na porta ${PORT}`);
+  console.log(`TacLines AI Backend rodando na porta ${PORT} usando ${MODEL}`);
 });
