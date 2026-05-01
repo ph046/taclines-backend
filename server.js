@@ -12,7 +12,7 @@ const client = new OpenAI({
 });
 
 const PORT = process.env.PORT || 3000;
-const MODEL = "gpt-4.1-mini";
+const MODEL = "gpt-5.5";
 
 app.get("/", (req, res) => {
   res.json({
