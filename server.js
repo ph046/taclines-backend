@@ -13,7 +13,7 @@ const client = new OpenAI({
 
 const PORT = process.env.PORT || 3000;
 const MODEL = "gpt-5.5";
-const REASONING = { effort: "high" };
+const REASONING = { effort: "medium" };
 
 app.get("/", (req, res) => {
   res.json({
