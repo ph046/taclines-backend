@@ -18,7 +18,7 @@ app.get("/", (req, res) => {
   res.json({
     ok: true,
     service: "TacLines AI Backend",
-    routes: ["/calibrate", "/plan-shot", "/ai-play-step"]
+    routes: ["/calibrate", "/plan-shot", "/ai-play-step", "/fine-tune-shot"]
   });
 });
 
@@ -122,6 +122,37 @@ app.post("/ai-play-step", async (req, res) => {
   } catch (err) {
     console.error("AI Play Step error:", err);
     return res.status(500).json(emptyAiPlayStep(getErrorMessage(err)));
+  }
+});
+
+app.post("/fine-tune-shot", async (req, res) => {
+  try {
+    const imageUrl = getImageUrlFromRequest(req);
+    const stepIndex = Number(req.body?.step_index ?? 0);
+    const maxSteps = Number(req.body?.max_steps ?? 4);
+
+    const result = await detectFineTuneShot(imageUrl, {
+      stepIndex,
+      maxSteps
+    });
+
+    const normalized = normalizeFineTuneResult(result);
+
+    console.log("Fine Tune Shot:", {
+      ok: normalized.ok,
+      action: normalized.action,
+      confidence: normalized.confidence,
+      direction: normalized.direction,
+      pixels: normalized.pixels,
+      power: normalized.power,
+      readyToShoot: normalized.readyToShoot,
+      message: normalized.message
+    });
+
+    return res.json(normalized);
+  } catch (err) {
+    console.error("Fine Tune error:", err);
+    return res.status(500).json(emptyFineTuneResult(getErrorMessage(err)));
   }
 });
 
@@ -304,6 +335,83 @@ async function detectAiPlayStep(imageUrl, options = {}) {
   }
 }
 
+async function detectFineTuneShot(imageUrl, options = {}) {
+  const stepIndex = Number.isFinite(options.stepIndex) ? options.stepIndex : 0;
+  const maxSteps = Number.isFinite(options.maxSteps) ? options.maxSteps : 4;
+
+  const response = await client.responses.create({
+    model: MODEL,
+    temperature: 0,
+    input: [
+      {
+        role: "system",
+        content: [
+          {
+            type: "input_text",
+            text:
+              "Você é um assistente visual de ajuste fino para sinuca 8 Ball Pool em Android. " +
+              "O usuário JÁ mirou manualmente perto da jogada desejada. " +
+              "Sua função NÃO é escolher uma jogada do zero. Sua função é analisar a mira atual e decidir se precisa de micro ajuste ou se já pode bater. " +
+              "Observe a bola branca, taco, linha de mira atual do jogo, bola alvo provável, caçapa provável e obstáculos. " +
+              "Ignore HUD, botões, nomes, avatar, menus, textos e barra de força. " +
+              "Se a mira estiver quase boa mas um pouco fora, responda action='adjust' com um gesto PEQUENO. " +
+              "Se a mira estiver boa para encaçapar ou claramente executar uma boa tacada, responda action='shoot'. " +
+              "Se a mira estiver muito ruim, confusa, sem linha clara, ou não der para ver a bola branca, responda action='stop'. " +
+              "Não faça movimentos grandes. Ajuste fino normalmente deve ter 3 a 35 pixels. No máximo 70 pixels. " +
+              "Use coordenadas absolutas em pixels da imagem recebida. " +
+              "gesture.fromX/fromY e toX/toY devem ser pontos reais de toque na tela, preferencialmente próximos da bola branca, taco ou área segura da mesa, nunca em HUD/botões. " +
+              "Retorne somente JSON conforme schema."
+          }
+        ]
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text:
+              `Passo ${stepIndex + 1} de no máximo ${maxSteps}. ` +
+              "O usuário já deixou a mira manualmente próxima. " +
+              "Faça apenas ajuste fino. " +
+              "Se precisar corrigir para esquerda/direita/cima/baixo ou sentido horário/anti-horário, action='adjust', readyToShoot=false. " +
+              "Para action='adjust', gesture deve ser um micro arraste curto de 3 a 70 pixels. " +
+              "Se a mira já estiver alinhada, action='shoot', readyToShoot=true, e gesture deve aplicar força adequada. " +
+              "A força deve ser power entre 0 e 1. Use força baixa/média se a bola estiver perto, força maior se estiver longe. " +
+              "Se não tiver certeza, action='stop'. " +
+              "Não troque a jogada do usuário; apenas refine a mira atual."
+          },
+          {
+            type: "input_image",
+            image_url: imageUrl
+          }
+        ]
+      }
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "fine_tune_shot",
+        strict: true,
+        schema: fineTuneSchema()
+      }
+    }
+  });
+
+  const text = response.output_text;
+
+  if (!text || typeof text !== "string") {
+    console.error("Fine tune sem output_text:", JSON.stringify(response, null, 2));
+    throw new Error("IA não retornou JSON no ajuste fino");
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    console.error("JSON inválido fine-tune:", text);
+    throw new Error("IA retornou JSON inválido no ajuste fino");
+  }
+}
+
 function sceneSchema() {
   return {
     type: "object",
@@ -427,6 +535,77 @@ function aiPlayStepSchema() {
   };
 }
 
+function fineTuneSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "ok",
+      "action",
+      "confidence",
+      "direction",
+      "pixels",
+      "gesture",
+      "power",
+      "readyToShoot",
+      "message"
+    ],
+    properties: {
+      ok: { type: "boolean" },
+      action: {
+        type: "string",
+        enum: ["adjust", "shoot", "stop", "fail", "none"]
+      },
+      confidence: {
+        type: "number",
+        minimum: 0,
+        maximum: 1
+      },
+      direction: {
+        type: "string",
+        enum: [
+          "left",
+          "right",
+          "up",
+          "down",
+          "clockwise",
+          "counterclockwise",
+          "none"
+        ]
+      },
+      pixels: {
+        type: "number",
+        minimum: 0,
+        maximum: 400
+      },
+      gesture: {
+        anyOf: [
+          {
+            type: "object",
+            additionalProperties: false,
+            required: ["fromX", "fromY", "toX", "toY", "durationMs"],
+            properties: {
+              fromX: { type: "number" },
+              fromY: { type: "number" },
+              toX: { type: "number" },
+              toY: { type: "number" },
+              durationMs: { type: "number" }
+            }
+          },
+          { type: "null" }
+        ]
+      },
+      power: {
+        type: "number",
+        minimum: 0,
+        maximum: 1
+      },
+      readyToShoot: { type: "boolean" },
+      message: { type: "string" }
+    }
+  };
+}
+
 function normalizeCalibration(raw) {
   const ok = Boolean(raw?.ok);
   const confidence = clampNumber(raw?.confidence, 0, 1, 0);
@@ -483,6 +662,30 @@ function normalizeAiPlayStep(raw) {
     gesture,
     done,
     shouldShoot,
+    message: String(raw?.message || "")
+  };
+}
+
+function normalizeFineTuneResult(raw) {
+  const action = String(raw?.action || "fail").toLowerCase();
+  const confidence = clampNumber(raw?.confidence, 0, 1, 0);
+  const direction = String(raw?.direction || "none").toLowerCase();
+  const pixels = clampNumber(raw?.pixels, 0, 400, 0);
+  const gesture = normalizeGesture(raw?.gesture);
+  const power = clampNumber(raw?.power, 0, 1, 0);
+  const readyToShoot = Boolean(raw?.readyToShoot);
+
+  const actionNeedsGesture = action === "adjust" || action === "shoot";
+
+  return {
+    ok: Boolean(raw?.ok) && confidence >= 0.35 && (!actionNeedsGesture || gesture !== null),
+    action,
+    confidence,
+    direction,
+    pixels,
+    gesture,
+    power,
+    readyToShoot,
     message: String(raw?.message || "")
   };
 }
@@ -930,6 +1133,20 @@ function emptyAiPlayStep(message) {
     done: true,
     shouldShoot: false,
     message: message || "Falha no passo da IA"
+  };
+}
+
+function emptyFineTuneResult(message) {
+  return {
+    ok: false,
+    action: "fail",
+    confidence: 0,
+    direction: "none",
+    pixels: 0,
+    gesture: null,
+    power: 0,
+    readyToShoot: false,
+    message: message || "Falha no ajuste fino"
   };
 }
 
