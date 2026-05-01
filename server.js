@@ -131,9 +131,15 @@ app.post("/fine-tune-shot", async (req, res) => {
     const stepIndex = Number(req.body?.step_index ?? 0);
     const maxSteps = Number(req.body?.max_steps ?? 4);
 
+    const calibratedPockets = normalizeCalibratedPockets(
+      req.body?.calibrated_pockets,
+      req.body || {}
+    );
+
     const result = await detectFineTuneShot(imageUrl, {
       stepIndex,
-      maxSteps
+      maxSteps,
+      calibratedPockets
     });
 
     const normalized = normalizeFineTuneResult(result);
@@ -146,6 +152,7 @@ app.post("/fine-tune-shot", async (req, res) => {
       pixels: normalized.pixels,
       power: normalized.power,
       readyToShoot: normalized.readyToShoot,
+      pockets: calibratedPockets.length,
       message: normalized.message
     });
 
@@ -338,6 +345,14 @@ async function detectAiPlayStep(imageUrl, options = {}) {
 async function detectFineTuneShot(imageUrl, options = {}) {
   const stepIndex = Number.isFinite(options.stepIndex) ? options.stepIndex : 0;
   const maxSteps = Number.isFinite(options.maxSteps) ? options.maxSteps : 4;
+  const calibratedPockets = Array.isArray(options.calibratedPockets)
+    ? options.calibratedPockets
+    : [];
+
+  const pocketsText = calibratedPockets.length >= 6
+    ? "BURACOS CALIBRADOS PELO USUÁRIO, já convertidos para coordenadas da imagem recebida. Use estes buracos como FONTE DA VERDADE e NÃO invente caçapas pela imagem: " +
+      JSON.stringify(calibratedPockets)
+    : "Nenhum buraco calibrado confiável foi enviado. Se não tiver certeza da caçapa, retorne action='stop'.";
 
   const response = await client.responses.create({
     model: MODEL,
@@ -352,9 +367,11 @@ async function detectFineTuneShot(imageUrl, options = {}) {
               "Você é um assistente visual de ajuste fino para sinuca 8 Ball Pool em Android. " +
               "O usuário JÁ mirou manualmente perto da jogada desejada. " +
               "Sua função NÃO é escolher uma jogada do zero. Sua função é analisar a mira atual e decidir se precisa de micro ajuste ou se já pode bater. " +
-              "Observe a bola branca, taco, linha de mira atual do jogo, bola alvo provável, caçapa provável e obstáculos. " +
+              "A informação mais importante: quando buracos calibrados forem enviados, você deve usar somente eles para saber onde estão as caçapas. " +
+              "Não tente estimar buraco por borda, sombra ou brilho se buracos calibrados existirem. " +
+              "Observe bola branca, taco, linha de mira atual do jogo, bola alvo provável, caçapa calibrada provável e obstáculos. " +
               "Ignore HUD, botões, nomes, avatar, menus, textos e barra de força. " +
-              "Se a mira estiver quase boa mas um pouco fora, responda action='adjust' com um gesto PEQUENO. " +
+              "Se a mira estiver quase boa mas um pouco fora, responda action='adjust' com gesto PEQUENO. " +
               "Se a mira estiver boa para encaçapar ou claramente executar uma boa tacada, responda action='shoot'. " +
               "Se a mira estiver muito ruim, confusa, sem linha clara, ou não der para ver a bola branca, responda action='stop'. " +
               "Não faça movimentos grandes. Ajuste fino normalmente deve ter 3 a 35 pixels. No máximo 70 pixels. " +
@@ -371,14 +388,15 @@ async function detectFineTuneShot(imageUrl, options = {}) {
             type: "input_text",
             text:
               `Passo ${stepIndex + 1} de no máximo ${maxSteps}. ` +
+              pocketsText + " " +
               "O usuário já deixou a mira manualmente próxima. " +
               "Faça apenas ajuste fino. " +
               "Se precisar corrigir para esquerda/direita/cima/baixo ou sentido horário/anti-horário, action='adjust', readyToShoot=false. " +
               "Para action='adjust', gesture deve ser um micro arraste curto de 3 a 70 pixels. " +
-              "Se a mira já estiver alinhada, action='shoot', readyToShoot=true, e gesture deve aplicar força adequada. " +
+              "Se a mira já estiver alinhada com uma bola alvo para uma das caçapas calibradas, action='shoot', readyToShoot=true, e gesture deve aplicar força adequada. " +
               "A força deve ser power entre 0 e 1. Use força baixa/média se a bola estiver perto, força maior se estiver longe. " +
-              "Se não tiver certeza, action='stop'. " +
-              "Não troque a jogada do usuário; apenas refine a mira atual."
+              "Se a mira aponta para uma caçapa falsa ou não bate com nenhum buraco calibrado, action='stop'. " +
+              "Não troque a jogada do usuário; apenas refine a mira atual usando os buracos calibrados."
           },
           {
             type: "input_image",
@@ -412,6 +430,62 @@ async function detectFineTuneShot(imageUrl, options = {}) {
   }
 }
 
+function normalizeCalibratedPockets(raw, body = {}) {
+  if (!Array.isArray(raw)) return [];
+
+  const originalW = Number(body.original_width);
+  const originalH = Number(body.original_height);
+  const uploadW = Number(body.upload_width);
+  const uploadH = Number(body.upload_height);
+
+  const sx =
+    Number.isFinite(originalW) &&
+    Number.isFinite(uploadW) &&
+    originalW > 0 &&
+    uploadW > 0
+      ? uploadW / originalW
+      : 1;
+
+  const sy =
+    Number.isFinite(originalH) &&
+    Number.isFinite(uploadH) &&
+    originalH > 0 &&
+    uploadH > 0
+      ? uploadH / originalH
+      : 1;
+
+  const order = [
+    "top_left",
+    "top_middle",
+    "top_right",
+    "bottom_left",
+    "bottom_middle",
+    "bottom_right"
+  ];
+
+  const out = raw
+    .map((p) => {
+      if (!p || typeof p !== "object") return null;
+
+      const id = String(p.id || "");
+      const x = Number(p.x);
+      const y = Number(p.y);
+
+      if (!id || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+
+      return {
+        id,
+        x: clampNumber(x * sx, 0, 10000, 0),
+        y: clampNumber(y * sy, 0, 10000, 0)
+      };
+    })
+    .filter(Boolean);
+
+  return order
+    .map((id) => out.find((p) => p.id === id))
+    .filter(Boolean);
+}
+
 function sceneSchema() {
   return {
     type: "object",
@@ -419,11 +493,7 @@ function sceneSchema() {
     required: ["ok", "confidence", "table", "cueBall", "balls", "pockets", "message"],
     properties: {
       ok: { type: "boolean" },
-      confidence: {
-        type: "number",
-        minimum: 0,
-        maximum: 1
-      },
+      confidence: { type: "number", minimum: 0, maximum: 1 },
       table: {
         anyOf: [
           {
@@ -491,26 +561,11 @@ function aiPlayStepSchema() {
   return {
     type: "object",
     additionalProperties: false,
-    required: [
-      "ok",
-      "action",
-      "confidence",
-      "gesture",
-      "done",
-      "shouldShoot",
-      "message"
-    ],
+    required: ["ok", "action", "confidence", "gesture", "done", "shouldShoot", "message"],
     properties: {
       ok: { type: "boolean" },
-      action: {
-        type: "string",
-        enum: ["drag", "shoot", "stop", "fail", "none"]
-      },
-      confidence: {
-        type: "number",
-        minimum: 0,
-        maximum: 1
-      },
+      action: { type: "string", enum: ["drag", "shoot", "stop", "fail", "none"] },
+      confidence: { type: "number", minimum: 0, maximum: 1 },
       gesture: {
         anyOf: [
           {
@@ -552,32 +607,13 @@ function fineTuneSchema() {
     ],
     properties: {
       ok: { type: "boolean" },
-      action: {
-        type: "string",
-        enum: ["adjust", "shoot", "stop", "fail", "none"]
-      },
-      confidence: {
-        type: "number",
-        minimum: 0,
-        maximum: 1
-      },
+      action: { type: "string", enum: ["adjust", "shoot", "stop", "fail", "none"] },
+      confidence: { type: "number", minimum: 0, maximum: 1 },
       direction: {
         type: "string",
-        enum: [
-          "left",
-          "right",
-          "up",
-          "down",
-          "clockwise",
-          "counterclockwise",
-          "none"
-        ]
+        enum: ["left", "right", "up", "down", "clockwise", "counterclockwise", "none"]
       },
-      pixels: {
-        type: "number",
-        minimum: 0,
-        maximum: 400
-      },
+      pixels: { type: "number", minimum: 0, maximum: 400 },
       gesture: {
         anyOf: [
           {
@@ -595,11 +631,7 @@ function fineTuneSchema() {
           { type: "null" }
         ]
       },
-      power: {
-        type: "number",
-        minimum: 0,
-        maximum: 1
-      },
+      power: { type: "number", minimum: 0, maximum: 1 },
       readyToShoot: { type: "boolean" },
       message: { type: "string" }
     }
@@ -609,31 +641,22 @@ function fineTuneSchema() {
 function normalizeCalibration(raw) {
   const ok = Boolean(raw?.ok);
   const confidence = clampNumber(raw?.confidence, 0, 1, 0);
-
   const table = normalizeTable(raw?.table);
   const cueBall = normalizeBall(raw?.cueBall, "white");
 
   const balls = Array.isArray(raw?.balls)
-    ? raw.balls
-        .map((b) => normalizeBall(b, ""))
-        .filter((b) => b !== null)
-        .filter((b) => !sameBall(b, cueBall))
+    ? raw.balls.map((b) => normalizeBall(b, "")).filter((b) => b !== null).filter((b) => !sameBall(b, cueBall))
     : [];
 
   let pockets = Array.isArray(raw?.pockets)
-    ? raw.pockets
-        .map((p) => normalizePoint(p))
-        .filter((p) => p !== null)
+    ? raw.pockets.map((p) => normalizePoint(p)).filter((p) => p !== null)
     : [];
 
   if (pockets.length < 4 && table) {
     pockets = estimatePocketsFromTable(table);
   }
 
-  const hasBasicData =
-    cueBall !== null &&
-    balls.length > 0 &&
-    pockets.length >= 4;
+  const hasBasicData = cueBall !== null && balls.length > 0 && pockets.length >= 4;
 
   return {
     ok: ok && hasBasicData,
@@ -652,7 +675,6 @@ function normalizeAiPlayStep(raw) {
   const gesture = normalizeGesture(raw?.gesture);
   const done = Boolean(raw?.done);
   const shouldShoot = Boolean(raw?.shouldShoot);
-
   const actionNeedsGesture = action === "drag" || action === "shoot";
 
   return {
@@ -674,7 +696,6 @@ function normalizeFineTuneResult(raw) {
   const gesture = normalizeGesture(raw?.gesture);
   const power = clampNumber(raw?.power, 0, 1, 0);
   const readyToShoot = Boolean(raw?.readyToShoot);
-
   const actionNeedsGesture = action === "adjust" || action === "shoot";
 
   return {
@@ -880,7 +901,6 @@ function estimatePocketsFromTable(table) {
   const x2 = table.x + table.w;
   const y2 = table.y + table.h;
   const mx = (x1 + x2) / 2;
-
   const padX = table.w * 0.025;
   const padY = table.h * 0.035;
 
@@ -955,7 +975,6 @@ function railRiskPenalty(point, table, radius) {
   const right = Math.abs(table.x + table.w - point.x);
   const top = Math.abs(point.y - table.y);
   const bottom = Math.abs(table.y + table.h - point.y);
-
   const minDist = Math.min(left, right, top, bottom);
 
   if (minDist < radius * 1.2) return 0.22;
@@ -991,7 +1010,6 @@ function distancePointToSegment(px, py, x1, y1, x2, y2) {
 
   const rawT = ((px - x1) * dx + (py - y1) * dy) / len2;
   const t = clampNumber(rawT, 0, 1, 0);
-
   const projX = x1 + t * dx;
   const projY = y1 + t * dy;
 
@@ -1026,9 +1044,7 @@ function hypot(x, y) {
 
 function sameBall(a, b) {
   if (!a || !b) return false;
-
   const r = Math.max(a.r || 12, b.r || 12);
-
   return hypot(a.x - b.x, a.y - b.y) < r * 0.55;
 }
 
@@ -1092,9 +1108,7 @@ function normalizeShotPoint(p) {
 
 function clampNumber(value, min, max, fallback) {
   const n = Number(value);
-
   if (!Number.isFinite(n)) return fallback;
-
   return Math.max(min, Math.min(max, n));
 }
 
